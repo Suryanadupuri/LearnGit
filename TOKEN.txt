@@ -1,0 +1,228 @@
+[8:52 AM] Nadupuri Surya
+
+from flask import Flask,request,jsonify,session
+import sqlite3
+import json
+import csv
+from functools import wraps
+import jwt  #json web token
+import datetime
+
+# Initializing Flask app
+app = Flask(__name__)
+app.config['SECRET_KEY']='Surya@123'
+
+def authentication(original_func):
+    @wraps(original_func)
+    def decorated(*args, **kwargs):
+        bearer = request.headers.get('Authorization', None)
+        try:
+            token = bearer.split()[1]
+            decoded_token = jwt.decode(token, app.config['SECRET_KEY'], algorithms=["HS256"])
+            return original_func(*args, **kwargs)
+        except jwt.exceptions.DecodeError:
+            return jsonify({'message': 'Please enter correct Token'}), 401
+        except jwt.exceptions.ExpiredSignatureError:
+            return jsonify({'message': 'Session has expired.Please login again'}), 401
+        except:
+            return jsonify({'message': 'You entered wrong credentials'}), 401
+
+    return decorated
+
+
+@app.route("/admin", methods=['GET', 'POST', 'PUT', 'DELETE'])
+def admin_login():
+    if request.method == 'GET':
+        admin = request.authorization
+        if not admin:
+            return jsonify({"error": "Enter admin credentials"})
+        elif (admin.username == 'user' and admin.password == 'surya'):
+            token = jwt.encode(
+                {'user': admin.username, 'exp': datetime.datetime.utcnow() + datetime.timedelta(minutes=10)},
+                app.config['SECRET_KEY'])
+            return jsonify({'token': token})
+        else:
+            return jsonify({"error": "Invalid user "})
+    else:
+        return jsonify({"error": "Method  not allowed"}), 400
+
+
+def create_datastore():
+
+    """This function used to create datastore table using the schema."""
+
+    # Read the schema from datastore
+    with open("datastore_schema.json", 'r') as file:
+        schema = json.load(file)
+
+        # Create the table schema
+        schema_table = f"Id {schema['Id']}, Summary {schema['Summary']}, Comment {schema['Comment']}"
+        conn = sqlite3.connect("new_database.db")
+        cursor = conn.cursor()
+
+        # Create the table in the database based on given schema
+        create_table_query = f"CREATE TABLE IF NOT EXISTS datastore ({schema_table})"
+        cursor.execute(create_table_query)
+
+        # commit the changes and close the connection.
+        conn.commit()
+        conn.close()
+
+create_datastore()
+
+@app.route('/load', methods=['POST'])
+@authentication
+def load_data():
+
+    """ This function is used to load the data from a CSV file into database """
+
+    try:
+        if request.method == 'POST':
+            # Connecting to the sqlite database
+            conn = sqlite3.connect("new_database.db")
+            cursor=conn.cursor()
+
+            # Here,opening the CSV file
+            with open('Filename.csv', 'r') as file:
+                reader = csv.DictReader(file)
+
+                # Iterating each row in the CSV file and insert into database
+                for person in reader:
+                    insert_query = "INSERT INTO datastore (Id, Summary, Comment) VALUES (?, ?, ?)"
+                    cursor.execute(insert_query, (person['Id'], person['Summary'], person['Comment']))
+
+                conn.commit()
+                conn.close()
+
+            return jsonify({"message": "Successfully data loaded from the CSV file"}), 200
+        else:
+            return jsonify({"error": "Method not allowed"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/insert', methods=['POST'])
+@authentication
+def insert_data():
+
+    """ This function is used to insert data into the datastore using POST request"""
+
+    # Requesting JSON data
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "Invalid data"}), 400
+    conn = None
+    try:
+        # Connect to the SQLite database
+        conn = sqlite3.connect("new_database.db")
+        cursor = conn.cursor()
+
+        # SQL query is created and inserting data into the database
+        insert_query = "INSERT INTO datastore (Id, Summary, Comment) VALUES (?, ?, ?)"
+        cursor.execute(insert_query, (data['Id'], data['Summary'], data['Comment']))
+        conn.commit()
+
+        return jsonify({"message": "Data inserted successfully"}), 201
+    except sqlite3.Error as e:
+        if conn:
+            conn.rollback()
+            return jsonify({"error": str(e)}), 500
+    finally:
+        if conn:
+            conn.close()
+
+@app.route('/get', methods=['GET'])
+@authentication
+def get_data():
+
+    """This function will retrieve all data from the database"""
+
+    conn = None
+    try:
+        if request.method == 'GET':
+            conn = sqlite3.connect('new_database.db')
+            cursor=conn.cursor()
+
+            # Execute this query to get all data from the database
+            select_query="select * from datastore"
+            cursor.execute(select_query)
+
+            # Fetching all data that will be a list of dictionaries
+            data = cursor.fetchall()
+            coloumns = ['Id', 'Summary', 'Comment']
+            dictionary = [{key: value for key, value in zip(coloumns, row)} for row in data]
+            return jsonify(dictionary), 200
+    except sqlite3.Error as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if conn:
+            conn.close()
+
+@app.route('/update', methods=['PUT'])
+@authentication
+def update_data():
+
+    """This function is used to update data in the database"""
+
+    conn=None
+    try:
+        data=request.get_json()
+        if not data or 'Id' not in data or 'Summary' not in data or 'Comment' not in data:
+            return jsonify({"error":"Invalid data"}),400
+
+        conn = sqlite3.connect('new_database.db')
+        cursor = conn.cursor()
+
+        # Execute this query to update the data in the database
+        update_query = "UPDATE datastore SET Summary = ?, Comment = ? WHERE Id = ?"
+        cursor.execute(update_query)
+        conn.commit()
+        conn.close()
+
+        return jsonify({"message": "Data updated successfully"}), 201
+    except sqlite3.Error as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if conn:
+            conn.close()
+
+
+@app.route('/search', methods=['POST'])
+def search_data():
+
+    """ This function can be used to search the data in the data store and dump into .xls file """
+
+    query = request.get_json().get('query', '')
+    conn=None
+    try:
+        # Connect to the SQLite database
+        conn = sqlite3.connect('new_database.db')
+        cursor = conn.cursor()
+
+        # Execute the select query with the search criteria
+        search_query = f"SELECT * FROM datastore WHERE Summary LIKE '%{query}%' OR Comment LIKE '%{query}%'"
+        cursor.execute(search_query)
+
+        # Fetch all data and return as JSON response
+        search_results = cursor.fetchall()
+
+        # Write search results to an Excel file
+        with open('search.xls', 'w', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow(['Id', 'Summary', 'Comment'])
+            for row in search_results:
+                writer.writerow(row)
+                return jsonify({"message": "Search results dumped to search.xls file"}), 200
+    except sqlite3.Error as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if conn:
+            conn.close()
+
+
+# Manually create the JSON schema data
+# json_schema = {"Id": "int","Summary": "string","Comment": "string"}
+
+
+if __name__ == "__main__":
+    app.run(debug=True)
